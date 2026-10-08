@@ -154,7 +154,7 @@ class CanvasView(QGraphicsView):
         self.set_tool(TOOL_SELECT)
 
     # --- документ ---
-    def set_document(self, doc: Document) -> None:
+    def set_document(self, doc: Document, fit: bool = True) -> None:
         self.doc = doc
         for item in self._items:
             self._scene.removeItem(item)
@@ -163,7 +163,8 @@ class CanvasView(QGraphicsView):
         self._scene.setSceneRect(-m, -m, doc.bed_width + 2 * m, doc.bed_height + 2 * m)
         for s in doc.shapes:
             self._add_item(s)
-        self.zoom_fit()
+        if fit:
+            self.zoom_fit()
 
     def _add_item(self, shape: Shape) -> ShapeItem:
         item = ShapeItem(shape, self.doc.layer(shape.layer_id) if self.doc else None)
@@ -260,7 +261,7 @@ class CanvasView(QGraphicsView):
 
     # --- инструменты ---
     def set_tool(self, tool: str) -> None:
-        self._cancel_drawing()
+        self.cancel_drawing()
         self.tool = tool
         if tool == TOOL_SELECT:
             self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
@@ -278,10 +279,13 @@ class CanvasView(QGraphicsView):
             p = QPointF(round(p.x() / s) * s, round(p.y() / s) * s)
         return p
 
-    def _cancel_drawing(self) -> None:
+    def cancel_drawing(self) -> bool:
+        """Сбросить незаконченную фигуру. Возвращает True, если что-то рисовалось."""
+        active = self._start is not None or bool(self._poly)
         self._start = None
         self._poly = []
         self._preview.setPath(QPainterPath())
+        return active
 
     def _make_shape(self, a: QPointF, b: QPointF, shift: bool) -> Shape | None:
         lid = self.current_layer_id
@@ -311,7 +315,7 @@ class CanvasView(QGraphicsView):
             pts = pts + [pts[0]]
         if len(pts) >= 2:
             self.shape_created.emit(Shape(self.current_layer_id, [pts], kind="path"))
-        self._cancel_drawing()
+        self.cancel_drawing()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.MiddleButton:
@@ -335,7 +339,7 @@ class CanvasView(QGraphicsView):
         if event.button() == Qt.MouseButton.LeftButton:
             self._start = p
         elif event.button() == Qt.MouseButton.RightButton:
-            self._cancel_drawing()
+            self.cancel_drawing()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         raw = self.mapToScene(event.position().toPoint())
@@ -373,7 +377,7 @@ class CanvasView(QGraphicsView):
                 and event.button() == Qt.MouseButton.LeftButton:
             shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             s = self._make_shape(self._start, self._scene_point(event), shift)
-            self._cancel_drawing()
+            self.cancel_drawing()
             if s:
                 self.shape_created.emit(s)
 
@@ -387,7 +391,7 @@ class CanvasView(QGraphicsView):
         key = event.key()
         if key == Qt.Key.Key_Escape:
             if self._poly or self._start:
-                self._cancel_drawing()
+                self.cancel_drawing()
             else:
                 self.set_tool(TOOL_SELECT)
             return

@@ -61,3 +61,49 @@ def test_job_on_simulator(win):
     assert wait_for(lambda: win.machine.pos_label.text().startswith("X: 0.00"))
     win.disconnect_machine()
     assert wait_for(lambda: win.worker is None)
+
+
+def test_undo_redo(win):
+    assert not win.undo_action.isEnabled()
+    win._on_shape_created(make_rect(0, 10, 10, 50, 40))
+    win._on_shape_created(make_rect(0, 60, 60, 80, 80))
+    assert len(win.doc.shapes) == 2 and win.undo_action.text() == "Отменить: Рисование: прямоугольник"
+
+    # перемещение
+    win.canvas._items[0].setSelected(True)
+    win.canvas._items[0].moveBy(5, 0)
+    win.canvas.shapes_moved.emit()
+    assert win.doc.shapes[0].dx == 5
+    win.undo()
+    assert win.doc.shapes[0].dx == 0 and win.canvas._items[0].pos().x() == 0
+
+    # удаление
+    win.canvas.select_all()
+    win.delete_selected()
+    assert win.doc.shapes == []
+    win.undo()
+    assert len(win.doc.shapes) == 2 and len(win.canvas._items) == 2
+
+    # подряд идущий ввод мощности склеивается в один шаг
+    lid = win.doc.layers[0].id
+    for p in (60, 70, 80):
+        win.doc.layers[0].power = p
+        win.layers.layers_changed.emit("Мощность слоя C00", f"layer:{lid}:power")
+    win.undo()
+    assert win.doc.layers[0].power == 50
+
+    win.undo()
+    win.undo()
+    assert win.doc.shapes == [] and not win.modified and not win.undo_action.isEnabled()
+    win.redo()
+    assert len(win.doc.shapes) == 1 and win.modified
+    assert win.redo_action.text() == "Повторить: Рисование: прямоугольник"
+
+
+def test_undo_cancels_unfinished_polyline_first(win):
+    win._on_shape_created(make_rect(0, 10, 10, 50, 40))
+    win.canvas._poly = [(0, 0), (5, 5)]
+    win.undo()
+    assert win.canvas._poly == [] and len(win.doc.shapes) == 1
+    win.undo()
+    assert win.doc.shapes == []

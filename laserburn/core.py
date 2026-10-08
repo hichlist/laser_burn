@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import asdict, dataclass
 
 Point = tuple[float, float]
@@ -137,6 +138,20 @@ class Document:
         shapes = self.shapes if shapes is None else shapes
         return paths_bounds([p for s in shapes for p in s.world_paths()])
 
+    # --- снимки для отмены действий ---
+    def snapshot(self) -> dict:
+        """Лёгкий снимок слоёв и фигур. Списки точек не копируются: геометрия фигуры
+        после создания не меняется, меняются только слой и смещение."""
+        return {
+            "layers": [asdict(layer) for layer in self.layers],
+            "shapes": [(s.layer_id, s.kind, s.dx, s.dy, s.paths) for s in self.shapes],
+        }
+
+    def restore(self, snap: dict) -> None:
+        self.layers = [Layer(**d) for d in snap["layers"]]
+        self.shapes = [Shape(layer_id=lid, paths=paths, kind=kind, dx=dx, dy=dy)
+                       for lid, kind, dx, dy, paths in snap["shapes"]]
+
     # --- сохранение ---
     def to_dict(self) -> dict:
         return {
@@ -167,6 +182,71 @@ class Document:
     def load(cls, path: str) -> Document:
         with open(path, encoding="utf-8") as f:
             return cls.from_dict(json.load(f))
+
+
+class UndoHistory:
+    """История действий для Ctrl+Z / Ctrl+Shift+Z.
+
+    Хранит снимки состояния после каждого действия. Подряд идущие изменения одного
+    поля (например, ввод мощности с клавиатуры) с одинаковым merge_key в пределах
+    MERGE_WINDOW секунд склеиваются в один шаг."""
+    MERGE_WINDOW = 2.0
+
+    def __init__(self, limit: int = 200):
+        self.limit = limit
+        self._undo: list[tuple[dict, str]] = []   # (предыдущее состояние, название действия)
+        self._redo: list[tuple[dict, str]] = []   # (следующее состояние, название действия)
+        self.current: dict | None = None
+        self._merge_key: str | None = None
+        self._merge_time = 0.0
+
+    def reset(self, state: dict) -> None:
+        self._undo.clear()
+        self._redo.clear()
+        self.current = state
+        self._merge_key = None
+
+    def commit(self, state: dict, label: str, merge_key: str | None = None) -> bool:
+        """Записать новое состояние. Возвращает False, если ничего не изменилось."""
+        if state == self.current:
+            return False
+        now = time.monotonic()
+        merge = (merge_key is not None and merge_key == self._merge_key and self._undo
+                 and now - self._merge_time < self.MERGE_WINDOW)
+        if not merge:
+            self._undo.append((self.current, label))
+            del self._undo[:-self.limit]
+        self._redo.clear()
+        self.current = state
+        self._merge_key = merge_key
+        self._merge_time = now
+        return True
+
+    def undo(self) -> dict | None:
+        if not self._undo:
+            return None
+        prev, label = self._undo.pop()
+        self._redo.append((self.current, label))
+        self.current = prev
+        self._merge_key = None
+        return prev
+
+    def redo(self) -> dict | None:
+        if not self._redo:
+            return None
+        nxt, label = self._redo.pop()
+        self._undo.append((self.current, label))
+        self.current = nxt
+        self._merge_key = None
+        return nxt
+
+    @property
+    def undo_label(self) -> str | None:
+        return self._undo[-1][1] if self._undo else None
+
+    @property
+    def redo_label(self) -> str | None:
+        return self._redo[-1][1] if self._redo else None
 
 
 @dataclass

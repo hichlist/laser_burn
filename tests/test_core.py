@@ -54,3 +54,44 @@ def test_save_load_roundtrip(tmp_path):
     assert (loaded.bed_width, loaded.bed_height) == (300, 200)
     assert loaded.layer(lyr.id) == lyr
     assert loaded.shapes[0].world_paths() == s.world_paths()
+
+
+def test_undo_history_basic():
+    from laserburn.core import UndoHistory
+    h = UndoHistory()
+    h.reset({"v": 0})
+    assert h.commit({"v": 1}, "раз")
+    assert not h.commit({"v": 1}, "без изменений")
+    assert h.commit({"v": 2}, "два")
+    assert h.undo_label == "два"
+    assert h.undo() == {"v": 1} and h.redo_label == "два"
+    assert h.undo() == {"v": 0} and h.undo() is None
+    assert h.redo() == {"v": 1}
+    h.commit({"v": 5}, "новое")  # новое действие сбрасывает повтор
+    assert h.redo() is None and h.undo() == {"v": 1}
+
+
+def test_undo_history_merge_and_limit():
+    from laserburn.core import UndoHistory
+    h = UndoHistory(limit=3)
+    h.reset({"v": 0})
+    for v in (10, 20, 30):
+        h.commit({"v": v}, "мощность", merge_key="layer:0:power")
+    assert h.undo() == {"v": 0} and h.undo() is None
+    h.reset({"v": 0})
+    for v in range(1, 10):
+        h.commit({"v": v}, f"шаг {v}")
+    assert [h.undo()["v"] for _ in range(3)] == [8, 7, 6]
+    assert h.undo() is None
+
+
+def test_snapshot_restore_shares_geometry():
+    doc = Document()
+    s = make_rect(0, 0, 0, 10, 10)
+    doc.shapes.append(s)
+    snap = doc.snapshot()
+    s.dx = 50
+    doc.layers[0].power = 99
+    doc.restore(snap)
+    assert doc.shapes[0].dx == 0 and doc.layers[0].power == 50
+    assert doc.shapes[0].paths is s.paths

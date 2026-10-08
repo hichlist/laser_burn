@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QDockWidget, 
                              QMainWindow, QMessageBox, QSpinBox, QVBoxLayout)
 
 from .canvas import (TOOL_ELLIPSE, TOOL_LINE, TOOL_POLYLINE, TOOL_RECT, TOOL_SELECT, CanvasView)
-from .core import Document, MachineSettings, Shape, paths_bounds
+from .core import Document, MachineSettings, Shape, UndoHistory, paths_bounds
 from .gcode import compile_document, frame_gcode
 from .grbl import RT_RESET, MachineStatus
 from .importers import import_file
@@ -147,6 +147,8 @@ class MainWindow(QMainWindow):
         self.doc = Document(self.settings.bed_width, self.settings.bed_height)
         self.file_path: str | None = None
         self.modified = False
+        self.history = UndoHistory()
+        self._saved_state: dict | None = None   # снимок на момент последнего сохранения
         self.worker: SerialWorker | None = None
         self.job_running = False
 
@@ -166,7 +168,7 @@ class MainWindow(QMainWindow):
 
         # Связи холста и слоёв
         self.canvas.shape_created.connect(self._on_shape_created)
-        self.canvas.shapes_moved.connect(self._mark_modified)
+        self.canvas.shapes_moved.connect(lambda: self._commit("Перемещение"))
         self.canvas.cursor_moved.connect(lambda x, y: self.cursor_label.setText(f"X: {x:.2f}  Y: {y:.2f} мм"))
         self.canvas.tool_changed.connect(self._on_tool_changed)
         self.layers.layers_changed.connect(self._on_layers_changed)
@@ -225,6 +227,9 @@ class MainWindow(QMainWindow):
         imp = self._action("Импорт SVG/DXF…", self.import_graphics, "Ctrl+I")
         export = self._action("Экспорт G-code…", self.export_gcode, "Ctrl+E")
         quit_ = self._action("Выход", self.close, QKeySequence.StandardKey.Quit)
+        self.undo_action = self._action("Отменить", self.undo, QKeySequence.StandardKey.Undo)
+        self.redo_action = self._action("Повторить", self.redo)
+        self.redo_action.setShortcuts([QKeySequence("Ctrl+Shift+Z"), QKeySequence("Ctrl+Y")])
         delete = self._action("Удалить", self.delete_selected, QKeySequence.StandardKey.Delete)
         select_all = self._action("Выделить всё", self.canvas.select_all, QKeySequence.StandardKey.SelectAll)
         assign = self._action("Назначить текущий слой выделенным",
@@ -257,6 +262,9 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction(quit_)
         m = mb.addMenu("Правка")
+        m.addAction(self.undo_action)
+        m.addAction(self.redo_action)
+        m.addSeparator()
         for a in (delete, select_all, assign):
             m.addAction(a)
         m = mb.addMenu("Инструменты")
@@ -277,6 +285,9 @@ class MainWindow(QMainWindow):
         for a in (new, open_, save, imp):
             tb.addAction(a)
         tb.addSeparator()
+        tb.addAction(self.undo_action)
+        tb.addAction(self.redo_action)
+        tb.addSeparator()
         for a in self.tool_actions.values():
             tb.addAction(a)
         tb.addSeparator()
@@ -293,17 +304,48 @@ class MainWindow(QMainWindow):
         self.canvas.set_document(doc)
         self.layers.set_document(doc)
         self.canvas.current_layer_id = self.layers.current_layer_id()
-        self.modified = False
-        self._update_title()
+        self.history.reset(doc.snapshot())
+        self._saved_state = self.history.current
+        self._update_modified()
 
     def _update_title(self) -> None:
         name = os.path.basename(self.file_path) if self.file_path else "Без имени"
         self.setWindowTitle(f"{name}{' *' if self.modified else ''} — {APP_NAME}")
 
-    def _mark_modified(self) -> None:
-        if not self.modified:
-            self.modified = True
-            self._update_title()
+    def _update_modified(self) -> None:
+        self.modified = self.history.current != self._saved_state
+        self._update_title()
+        undo, redo = self.history.undo_label, self.history.redo_label
+        self.undo_action.setEnabled(undo is not None)
+        self.redo_action.setEnabled(redo is not None)
+        self.undo_action.setText(f"Отменить: {undo}" if undo else "Отменить")
+        self.redo_action.setText(f"Повторить: {redo}" if redo else "Повторить")
+
+    def _commit(self, label: str, merge_key: str | None = None) -> None:
+        """Зафиксировать действие пользователя в истории отмены."""
+        if self.history.commit(self.doc.snapshot(), label, merge_key):
+            self._update_modified()
+
+    def undo(self) -> None:
+        if self.canvas.cancel_drawing():
+            return  # сначала отменяется незаконченная фигура
+        state = self.history.undo()
+        if state is not None:
+            self._restore(state)
+
+    def redo(self) -> None:
+        self.canvas.cancel_drawing()
+        state = self.history.redo()
+        if state is not None:
+            self._restore(state)
+
+    def _restore(self, state: dict) -> None:
+        layer_id = self.layers.current_layer_id()
+        self.doc.restore(state)
+        self.canvas.set_document(self.doc, fit=False)
+        self.layers.rebuild(layer_id if self.doc.layer(layer_id) else self.doc.layers[0].id)
+        self.canvas.current_layer_id = self.layers.current_layer_id()
+        self._update_modified()
 
     def _confirm_discard(self) -> bool:
         if not self.modified:
@@ -342,8 +384,8 @@ class MainWindow(QMainWindow):
         except OSError as e:
             QMessageBox.critical(self, APP_NAME, f"Не удалось сохранить:\n{e}")
             return False
-        self.modified = False
-        self._update_title()
+        self._saved_state = self.history.current
+        self._update_modified()
         self.statusBar().showMessage(f"Сохранено: {self.file_path}", 3000)
         return True
 
@@ -388,7 +430,7 @@ class MainWindow(QMainWindow):
             shapes.append(shape)
         self.layers.rebuild()
         self.canvas.refresh_layers()
-        self._mark_modified()
+        self._commit(f"Импорт {os.path.basename(path)}")
         self.statusBar().showMessage(
             f"Импортировано {len(all_paths)} контуров, {b[2] - b[0]:.1f} × {b[3] - b[1]:.1f} мм", 5000)
         return shapes
@@ -435,7 +477,8 @@ class MainWindow(QMainWindow):
     def _on_shape_created(self, shape: Shape) -> None:
         shape.layer_id = self.layers.current_layer_id()
         self.canvas.add_shape(shape)
-        self._mark_modified()
+        names = {"line": "линия", "rect": "прямоугольник", "ellipse": "эллипс", "path": "полилиния"}
+        self._commit(f"Рисование: {names.get(shape.kind, 'фигура')}")
 
     def _on_tool_changed(self, tool: str) -> None:
         if tool in self.tool_actions:
@@ -444,9 +487,9 @@ class MainWindow(QMainWindow):
     def _toggle_snap(self, checked: bool) -> None:
         self.canvas.snap = checked
 
-    def _on_layers_changed(self) -> None:
+    def _on_layers_changed(self, label: str, merge_key: str) -> None:
         self.canvas.refresh_layers()
-        self._mark_modified()
+        self._commit(label, merge_key or None)
 
     def _on_current_layer(self, layer_id: int) -> None:
         self.canvas.current_layer_id = layer_id
@@ -457,13 +500,13 @@ class MainWindow(QMainWindow):
             s.layer_id = layer_id
         if shapes:
             self.canvas.refresh_layers()
-            self._mark_modified()
+            self._commit("Смена слоя объектов")
 
     def delete_selected(self) -> None:
         shapes = self.canvas.selected_shapes()
         if shapes:
             self.canvas.remove_shapes(shapes)
-            self._mark_modified()
+            self._commit("Удаление")
 
     # --- станок ---
     def connect_machine(self, port: str, baud: int) -> None:

@@ -42,10 +42,12 @@ class _DSpin(_NoWheelMixin, QDoubleSpinBox):
 
 
 class LayerPanel(QWidget):
+    ATTR_NAMES = {"output": "Вывод", "mode": "Режим", "speed": "Скорость", "power": "Мощность",
+                  "passes": "Проходы", "interval": "Интервал", "constant_power": "M3"}
     COLUMNS = ["Вывод", "Цвет", "Слой", "Режим", "Скорость,\nмм/мин", "Мощность,\n%",
                "Проходы", "Интервал,\nмм", "M3"]
 
-    layers_changed = pyqtSignal()
+    layers_changed = pyqtSignal(str, str)   # название действия, ключ склейки ("" — не склеивать)
     current_layer_changed = pyqtSignal(int)
     assign_requested = pyqtSignal(int)
 
@@ -113,15 +115,16 @@ class LayerPanel(QWidget):
         self.select_layer(select_id)
 
     def _fill_row(self, row: int, layer: Layer) -> None:
-        def changed(attr, conv=lambda v: v):
+        def changed(attr, merge=True):
             def handler(value):
-                setattr(layer, attr, conv(value))
-                self.layers_changed.emit()
+                setattr(layer, attr, value)
+                self.layers_changed.emit(f"{self.ATTR_NAMES[attr]} слоя {layer.name}",
+                                         f"layer:{layer.id}:{attr}" if merge else "")
             return handler
 
         out = QCheckBox()
         out.setChecked(layer.output)
-        out.toggled.connect(changed("output"))
+        out.toggled.connect(changed("output", merge=False))
         self.table.setCellWidget(row, 0, _centered(out))
 
         color_btn = QPushButton()
@@ -137,7 +140,7 @@ class LayerPanel(QWidget):
         for key in (MODE_CUT, MODE_FILL):
             mode.addItem(MODE_NAMES[key], key)
         mode.setCurrentIndex(0 if layer.mode == MODE_CUT else 1)
-        mode.currentIndexChanged.connect(lambda i, m=mode: changed("mode")(m.itemData(i)))
+        mode.currentIndexChanged.connect(lambda i, m=mode: changed("mode", merge=False)(m.itemData(i)))
         self.table.setCellWidget(row, 3, mode)
 
         speed = _DSpin()
@@ -170,13 +173,14 @@ class LayerPanel(QWidget):
 
         const = QCheckBox()
         const.setChecked(layer.constant_power)
-        const.toggled.connect(changed("constant_power"))
+        const.toggled.connect(changed("constant_power", merge=False))
         self.table.setCellWidget(row, 8, _centered(const))
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         if item.column() == 2 and 0 <= item.row() < len(self.doc.layers):
-            self.doc.layers[item.row()].name = item.text().strip() or self.doc.layers[item.row()].name
-            self.layers_changed.emit()
+            layer = self.doc.layers[item.row()]
+            layer.name = item.text().strip() or layer.name
+            self.layers_changed.emit("Переименование слоя", "")
 
     def _on_selection(self) -> None:
         self.current_layer_changed.emit(self.current_layer_id())
@@ -186,12 +190,12 @@ class LayerPanel(QWidget):
         if c.isValid():
             layer.color = c.name()
             self.rebuild(layer.id)
-            self.layers_changed.emit()
+            self.layers_changed.emit(f"Цвет слоя {layer.name}", "")
 
     def _add(self) -> None:
         layer = self.doc.add_layer()
         self.rebuild(layer.id)
-        self.layers_changed.emit()
+        self.layers_changed.emit("Добавление слоя", "")
 
     def _remove(self) -> None:
         if len(self.doc.layers) <= 1:
@@ -207,13 +211,13 @@ class LayerPanel(QWidget):
             return
         self.doc.remove_layer(lid)
         self.rebuild(self.doc.layers[0].id)
-        self.layers_changed.emit()
+        self.layers_changed.emit(f"Удаление слоя {layer.name}", "")
 
     def _move(self, delta: int) -> None:
         lid = self.current_layer_id()
         self.doc.move_layer(lid, delta)
         self.rebuild(lid)
-        self.layers_changed.emit()
+        self.layers_changed.emit("Порядок слоёв", "")
 
 
 class MachinePanel(QWidget):

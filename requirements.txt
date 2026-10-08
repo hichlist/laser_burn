@@ -1,0 +1,5 @@
+PyQt6>=6.5
+pyserial>=3.5
+# Импорт векторной графики
+svgelements>=1.9
+ezdxf>=1.1
